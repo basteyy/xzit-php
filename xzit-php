@@ -12,12 +12,12 @@
 #   - list versions|pools         : Discover installed PHP versions and pools
 #
 # Notes:
-#   - Uses ppa:ondrej/php (Sury) for broad version coverage (5.6 → 8.5)
+#   - Uses ppa:ondrej/php (Sury) for broad version coverage (5.6 → 8.x)
 #   - Pool files live in /etc/php/<ver>/fpm/pool.d/<pool>.conf
 #   - After changes: php-fpm<ver> service (re)starts automatically
 set -euo pipefail
 
-SUPPORTED_ALL_VERSIONS=("5.6" "7.2" "8.0" "8.1" "8.2" "8.3" "8.4" "8.5")
+SUPPORTED_ALL_VERSIONS=("5.6" "7.2" "8.0" "8.1" "8.2" "8.3" "8.4")
 # Note: 'fpm' is installed explicitly; do not include it here to avoid duplication
 DEFAULT_MODULES=(common cli mysql xml curl mbstring intl bcmath gd zip opcache memcached)
 # extra modules we often want if available
@@ -56,6 +56,12 @@ is_version_installed() {
   dpkg -l | awk '{print $2}' | grep -q "^php${ver}-fpm$" || [ -x "/usr/sbin/php-fpm${ver}" ]
 }
 
+# Check if a PHP version is available in repositories
+is_version_available() {
+  local ver="$1"
+  apt-cache show --no-all-versions "php${ver}-fpm" >/dev/null 2>&1
+}
+
 # Resolve an apt package name for a module and version.
 # Prefer versioned package php<ver>-<mod>, else fallback to unversioned php-<mod>.
 resolve_pkg_name() {
@@ -70,7 +76,7 @@ resolve_pkg_name() {
     echo "$punv"
     return 0
   fi
-  die "Module '${mod}' not found for PHP ${ver} (tried ${pver} / ${punv})."
+  return 1
 }
 
 # Build default module package list for a version
@@ -81,6 +87,11 @@ build_default_pkg_list() {
     if apt-cache show --no-all-versions "php${ver}-${m}" >/dev/null 2>&1; then
       pkgs+=("php${ver}-${m}")
     elif apt-cache show --no-all-versions "php-${m}" >/dev/null 2>&1; then
+      # Only add unversioned package if it's not a virtual package with multiple providers
+      if ! apt-cache show "php-${m}" 2>/dev/null | grep -q "Package: php-${m}"; then
+        log "Skipping virtual package php-${m} (use php${ver}-${m} instead)"
+        continue
+      fi
       pkgs+=("php-${m}")
     fi
   done
@@ -89,7 +100,11 @@ build_default_pkg_list() {
     if apt-cache show --no-all-versions "php${ver}-${m}" >/dev/null 2>&1; then
       pkgs+=("php${ver}-${m}")
     elif apt-cache show --no-all-versions "php-${m}" >/dev/null 2>&1; then
-      pkgs+=("php-${m}")
+      if apt-cache show "php-${m}" 2>/dev/null | grep -q "Package: php-${m}"; then
+        pkgs+=("php-${m}")
+      else
+        continue
+      fi
     fi
   done
   if apt-cache show --no-all-versions "php-pear" >/dev/null 2>&1; then
@@ -102,16 +117,34 @@ install_version() {
   local ver="$1"
   validate_version "$ver"
   ensure_ondrej_repo
+
+  # Check if version is available
+  if ! is_version_available "$ver"; then
+    die "PHP ${ver} is not available in repositories. Please check if this version is supported."
+  fi
+
   log "Installing PHP ${ver} FPM + common modules…"
   # Build a proper array of packages to avoid quoting/word-splitting issues
   local pkgs_arr=()
   # shellcheck disable=SC2207
   read -r -a pkgs_arr <<< "$(build_default_pkg_list "$ver")"
+
   # Install php-fpm for the version plus modules
-  apt-get install -y "php${ver}-fpm" "${pkgs_arr[@]}"
+  if ! apt-get install -y "php${ver}-fpm" "${pkgs_arr[@]}"; then
+    die "Failed to install PHP ${ver}. Installation aborted."
+  fi
+
+  # Verify FPM service exists before trying to enable/restart
+  if ! systemctl list-unit-files "php${ver}-fpm.service" >/dev/null 2>&1; then
+    die "PHP ${ver} FPM service not found after installation. Installation may have failed."
+  fi
+
   systemctl enable "php${ver}-fpm" || true
-  systemctl restart "php${ver}-fpm"
-  log "PHP ${ver} installed."
+  if ! systemctl restart "php${ver}-fpm"; then
+    die "Failed to start php${ver}-fpm service."
+  fi
+
+  log "PHP ${ver} installed successfully."
 }
 
 uninstall_version() {
@@ -319,7 +352,7 @@ cat <<'USAGE'
 xzit-php — manage multiple PHP-FPM versions on Ubuntu (Sury PPA)
 Usage:
   xzit-php install <version>            Install PHP <version> (e.g. 8.2)
-  xzit-php install --all                Install common set: 5.6 7.2 8.0 8.1 8.2 8.3 8.4 8.5
+  xzit-php install --all                Install common set: 5.6 7.2 8.0 8.1 8.2 8.3 8.4
   xzit-php uninstall <version>          Uninstall PHP <version>
   xzit-php uninstall --all              Uninstall all installed PHP versions
   xzit-php pool add --n <name> --v <version>        Add FPM pool
