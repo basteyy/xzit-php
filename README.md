@@ -1,6 +1,6 @@
 # xzit-php
 
-[![GitHub release](https://img.shields.io/github/release/basteyy/xzit-php.svg)](ttps://github.com/basteyy/xzit-php/releases)
+[![GitHub release](https://img.shields.io/github/release/basteyy/xzit-php.svg)](https://github.com/basteyy/xzit-php/releases)
 [![License: CC0-1.0](https://img.shields.io/badge/License-CC0_1.0-lightgrey.svg)](https://creativecommons.org/publicdomain/zero/1.0/)
 
 
