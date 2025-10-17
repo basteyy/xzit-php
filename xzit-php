@@ -105,10 +105,11 @@ build_default_pkg_list() {
     if apt-cache show --no-all-versions "php${ver}-${m}" >/dev/null 2>&1; then
       pkgs+=("php${ver}-${m}")
     elif apt-cache show --no-all-versions "php-${m}" >/dev/null 2>&1; then
-      if ! apt-cache show "php-${m}" 2>/dev/null | grep -q "Package: php-${m}"; then
+      if apt-cache show "php-${m}" 2>/dev/null | grep -q "Package: php-${m}"; then
+        pkgs+=("php-${m}")
+      else
         continue
       fi
-      pkgs+=("php-${m}")
     fi
   done
   if apt-cache show --no-all-versions "php-pear" >/dev/null 2>&1; then
