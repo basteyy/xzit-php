@@ -1,0 +1,433 @@
+#!/usr/bin/env bash
+# xzit-php: Multi-version PHP FPM installer & manager for Ubuntu (Sury PPA)
+# License: CC0 1.0 Universal - see LICENSE
+# Author: Sebastian (xzit) — generated with ChatGPT
+# Requires: Ubuntu (20.04/22.04/24.04/25.x), apt, sudo/root
+#
+# Features:
+#   - install <ver>|--all         : Install PHP-FPM with sane default modules
+#   - uninstall <ver>|--all       : Remove PHP-FPM and modules
+#   - pool add/remove/change      : Manage & migrate PHP-FPM pools per version
+#   - module <name> [--v ver]     : Add/remove module across versions or specific
+#   - list versions|pools         : Discover installed PHP versions and pools
+#
+# Notes:
+#   - Uses ppa:ondrej/php (Sury) for broad version coverage (5.6 → 8.5)
+#   - Pool files live in /etc/php/<ver>/fpm/pool.d/<pool>.conf
+#   - After changes: php-fpm<ver> service (re)starts automatically
+set -euo pipefail
+
+SUPPORTED_ALL_VERSIONS=("5.6" "7.2" "8.0" "8.1" "8.2" "8.3" "8.4" "8.5")
+DEFAULT_MODULES=(common cli fpm mysql xml curl mbstring intl bcmath gd zip opcache memcached)
+# extra modules we often want if available
+EXTRA_MODULES=(imagick redis xdebug)
+
+# ---------- helpers ----------
+die() { echo "ERROR: $*" >&2; exit 1; }
+log() { echo "[xzit-php] $*"; }
+is_root() { [ "$(id -u)" -eq 0 ]; }
+exists() { command -v "$1" >/dev/null 2>&1; }
+
+ensure_root() { is_root || die "Run as root (sudo)."; }
+
+# Enable and update ondrej/php repository (for many PHP versions)
+ensure_ondrej_repo() {
+  if ! grep -Rqs "^deb .*ondrej/php" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+    log "Adding PPA: ondrej/php (Sury)…"
+    apt-get update -y
+    apt-get install -y software-properties-common ca-certificates lsb-release apt-transport-https
+    add-apt-repository -y ppa:ondrej/php
+  fi
+  apt-get update -y
+}
+
+# Determine if a PHP version is installed (by fpm package or binary)
+is_version_installed() {
+  local ver="$1"
+  dpkg -l | awk '{print $2}' | grep -q "^php${ver}-fpm$" || [ -x "/usr/sbin/php-fpm${ver}" ]
+}
+
+# Resolve an apt package name for a module and version.
+# Prefer versioned package php<ver>-<mod>, else fallback to unversioned php-<mod>.
+resolve_pkg_name() {
+  local ver="$1" mod="$2"
+  local pver="php${ver}-${mod}"
+  local punv="php-${mod}"
+  if apt-cache show --no-all-versions "$pver" >/dev/null 2>&1; then
+    echo "$pver"
+    return 0
+  fi
+  if apt-cache show --no-all-versions "$punv" >/dev/null 2>&1; then
+    echo "$punv"
+    return 0
+  fi
+  die "Module '${mod}' not found for PHP ${ver} (tried ${pver} / ${punv})."
+}
+
+# Build default module package list for a version
+build_default_pkg_list() {
+  local ver="$1"
+  local pkgs=()
+  for m in "${DEFAULT_MODULES[@]}"; do
+    pkgs+=("php${ver}-${m}")
+  done
+  # attempt extra modules if available (no fatal if missing)
+  for m in "${EXTRA_MODULES[@]}"; do
+    if apt-cache show --no-all-versions "php${ver}-${m}" >/dev/null 2>&1; then
+      pkgs+=("php${ver}-${m}")
+    elif apt-cache show --no-all-versions "php-${m}" >/dev/null 2>&1; then
+      pkgs+=("php-${m}")
+    fi
+  done
+  if apt-cache show --no-all-versions "php-pear" >/dev/null 2>&1; then
+    pkgs+=("php-pear")
+  fi
+  echo "${pkgs[@]}"
+}
+
+install_version() {
+  local ver="$1"
+  ensure_ondrej_repo
+  log "Installing PHP ${ver} FPM + common modules…"
+  local pkgs
+  pkgs=$(build_default_pkg_list "$ver")
+  pkgs="$pkgs php${ver}-fpm"
+  apt-get install -y $pkgs
+  systemctl enable "php${ver}-fpm" || true
+  systemctl restart "php${ver}-fpm"
+  log "PHP ${ver} installed."
+}
+
+uninstall_version() {
+  local ver="$1"
+  if ! is_version_installed "$ver"; then
+    log "PHP ${ver} not installed — skipping."
+    return 0
+  fi
+  log "Stopping php${ver}-fpm…"
+  systemctl stop "php${ver}-fpm" || true
+  log "Removing PHP ${ver} packages…"
+  local pkgs
+  pkgs=$(dpkg -l | awk '/^ii/ {print $2}' | grep -E "^php'"'"'${ver}'"'"'-" || true)
+  if [ -n "$pkgs" ]; then
+    apt-get purge -y $pkgs || true
+  fi
+  apt-get autoremove -y
+  log "PHP ${ver} removed."
+}
+
+install_module() {
+  local mod="$1" ver="${2:-}"
+  ensure_ondrej_repo
+  if [ -n "$ver" ]; then
+    is_version_installed "$ver" || die "PHP ${ver} not installed."
+    local pkg
+    pkg=$(resolve_pkg_name "$ver" "$mod")
+    log "Installing module ${mod} for PHP ${ver} -> ${pkg}"
+    apt-get install -y "$pkg"
+    systemctl restart "php${ver}-fpm"
+  else
+    local versions
+    versions=$(list_versions_raw)
+    for v in $versions; do
+      local pkg
+      if pkg=$(resolve_pkg_name "$v" "$mod" 2>/dev/null); then
+        log "Installing module ${mod} for PHP ${v} -> ${pkg}"
+        apt-get install -y "$pkg" || true
+        systemctl restart "php${v}-fpm" || true
+      else
+        log "Module ${mod} not available for PHP ${v}, skipping."
+      fi
+    done
+  fi
+}
+
+remove_module() {
+  local mod="$1" ver="${2:-}"
+  if [ -n "$ver" ]; then
+    is_version_installed "$ver" || die "PHP ${ver} not installed."
+    local pkg
+    if pkg=$(resolve_pkg_name "$ver" "$mod" 2>/dev/null); then
+      log "Removing module ${mod} for PHP ${ver} -> ${pkg}"
+      apt-get purge -y "$pkg" || true
+      systemctl restart "php${ver}-fpm" || true
+    else
+      log "Module ${mod} not present for PHP ${ver}."
+    fi
+  else
+    local versions
+    versions=$(list_versions_raw)
+    for v in $versions; do
+      local pkg
+      if pkg=$(resolve_pkg_name "$v" "$mod" 2>/dev/null); then
+        log "Removing module ${mod} for PHP ${v} -> ${pkg}"
+        apt-get purge -y "$pkg" || true
+        systemctl restart "php${v}-fpm" || true
+      fi
+    done
+    apt-get autoremove -y || true
+  fi
+}
+
+pool_add() {
+  local name="$1" ver="$2"
+  is_version_installed "$ver" || die "PHP ${ver} not installed."
+  local dir="/etc/php/${ver}/fpm/pool.d"
+  local file="${dir}/${name}.conf"
+  [ -d "$dir" ] || die "Pool directory not found: $dir"
+  [ -e "$file" ] && die "Pool '${name}' already exists for PHP ${ver}."
+  cat >"$file" <<EOF
+[${name}]
+user=www-data
+group=www-data
+listen=/run/php/php${ver}-${name}.sock
+listen.owner=www-data
+listen.group=www-data
+pm=dynamic
+pm.max_children=16
+pm.start_servers=4
+pm.min_spare_servers=2
+pm.max_spare_servers=6
+php_admin_value[error_log] = /var/log/php${ver}-fpm.${name}.log
+php_admin_flag[log_errors] = on
+request_terminate_timeout = 120s
+EOF
+  systemctl reload "php${ver}-fpm"
+  log "Pool '${name}' created for PHP ${ver}. Socket: /run/php/php${ver}-${name}.sock"
+}
+
+pool_remove() {
+  local name="$1"
+  local versions
+  versions=$(list_versions_raw)
+  local removed=0
+  for v in $versions; do
+    local file="/etc/php/${v}/fpm/pool.d/${name}.conf"
+    if [ -e "$file" ]; then
+      rm -f "$file"
+      systemctl reload "php${v}-fpm" || true
+      log "Removed pool '${name}' from PHP ${v}."
+      removed=1
+    fi
+  done
+  [ "$removed" -eq 1 ] || die "Pool '${name}' not found in any installed version."
+}
+
+# NEW: pool change — migrate a pool from its current PHP version to another one
+pool_change() {
+  local name="$1" new_ver="$2"
+  is_version_installed "$new_ver" || die "Target PHP ${new_ver} not installed."
+  local found_ver="" src_file=""
+  local versions
+  versions=$(list_versions_raw || true)
+  for v in $versions; do
+    local f="/etc/php/${v}/fpm/pool.d/${name}.conf"
+    if [ -e "$f" ]; then
+      if [ -n "$found_ver" ]; then
+        die "Pool '${name}' exists in multiple versions (${found_ver}, ${v}). Resolve manually."
+      fi
+      found_ver="$v"
+      src_file="$f"
+    fi
+  done
+  [ -n "$found_ver" ] || die "Pool '${name}' not found in any installed version."
+  [ "$found_ver" != "$new_ver" ] || die "Pool '${name}' is already on PHP ${new_ver}."
+  local dst_dir="/etc/php/${new_ver}/fpm/pool.d"
+  local dst_file="${dst_dir}/${name}.conf"
+  [ -d "$dst_dir" ] || die "Destination pool dir not found: ${dst_dir}"
+  [ ! -e "$dst_file" ] || die "Destination already has pool '${name}' on PHP ${new_ver}."
+  # Copy & rewrite versioned paths (listen socket + error_log)
+  cp "$src_file" "$dst_file"
+  sed -i -E "s|/run/php/php${found_ver}-${name}\.sock|/run/php/php${new_ver}-${name}.sock|g" "$dst_file"
+  sed -i -E "s|/var/log/php${found_ver}-fpm\.${name}\.log|/var/log/php${new_ver}-fpm.${name}.log|g" "$dst_file"
+  # Optional: some users may have custom listen paths; warn if not matched
+  if ! grep -q "/run/php/php${new_ver}-${name}.sock" "$dst_file"; then
+    log "Warning: custom listen path detected — please adjust '${dst_file}' manually."
+  fi
+  # Remove old and reload services
+  rm -f "$src_file"
+  systemctl reload "php${found_ver}-fpm" || true
+  systemctl reload "php${new_ver}-fpm"
+  log "Pool '${name}' migrated: PHP ${found_ver} → ${new_ver}."
+  log "New socket: /run/php/php${new_ver}-${name}.sock"
+}
+
+list_versions_raw() {
+  dpkg -l | awk '/^ii/ {print $2}' | grep -E '^php[0-9]\.[0-9]-fpm$' | sed -E 's/php([0-9]\.[0-9])-fpm/\1/' | sort -V
+}
+
+list_versions_cmd() {
+  local versions
+  versions=$(list_versions_raw || true)
+  if [ -z "$versions" ]; then
+    echo "No PHP-FPM versions installed."
+    return 0
+  fi
+  echo "Installed PHP-FPM versions:"
+  echo "$versions" | sed 's/^/  - /'
+}
+
+list_pools_cmd() {
+  local ver="${1:-}"
+  if [ -n "$ver" ]; then
+    is_version_installed "$ver" || die "PHP ${ver} not installed."
+    local dir="/etc/php/${ver}/fpm/pool.d"
+    [ -d "$dir" ] || die "No pool.d dir for PHP ${ver}"
+    echo "Pools for PHP ${ver}:"
+    find "$dir" -maxdepth 1 -type f -name '*.conf' -printf '  - %f\n' | sed 's/\.conf$//'
+  else
+    echo "Pools across all installed versions:"
+    local versions
+    versions=$(list_versions_raw || true)
+    for v in $versions; do
+      local dir="/etc/php/${v}/fpm/pool.d"
+      if [ -d "$dir" ]; then
+        local items
+        items=$(find "$dir" -maxdepth 1 -type f -name '*.conf' -printf '%f\n' | sed 's/\.conf$//' || true)
+        if [ -n "$items" ]; then
+          echo "  PHP ${v}:"
+          echo "$items" | sed 's/^/    - /'
+        else
+          echo "  PHP ${v}: (no pools)"
+        fi
+      fi
+    done
+  fi
+}
+
+usage() {
+cat <<'USAGE'
+xzit-php — manage multiple PHP-FPM versions on Ubuntu (Sury PPA)
+Usage:
+  xzit-php install <version>            Install PHP <version> (e.g. 8.2)
+  xzit-php install --all                Install common set: 5.6 7.2 8.0 8.1 8.2 8.3 8.4 8.5
+  xzit-php uninstall <version>          Uninstall PHP <version>
+  xzit-php uninstall --all              Uninstall all installed PHP versions
+  xzit-php pool add --n <name> --v <version>        Add FPM pool
+  xzit-php pool remove --n <name>                   Remove pool from all versions
+  xzit-php pool change --n <name> --v <new-version> Move/migrate pool to another PHP version
+  xzit-php module <name> [--v <version>]           Install module across all or for version
+  xzit-php module <name> --rm [--v <version>]      Remove module across all or for version
+  xzit-php list versions                  List installed PHP-FPM versions
+  xzit-php list pools [--v <version>]     List pools (all or per version)
+
+Examples:
+  xzit-php pool change --n shop --v 8.3
+USAGE
+}
+
+# ---------- argument parsing ----------
+main() {
+  ensure_root
+
+  local cmd="${1:-}"; shift || true
+
+  case "$cmd" in
+    install)
+      local what="${1:-}"; [ -n "$what" ] || { usage; exit 1; }
+      if [ "$what" = "--all" ]; then
+        for v in "${SUPPORTED_ALL_VERSIONS[@]}"; do
+          install_version "$v"
+        done
+      else
+        install_version "$what"
+      fi
+      ;;
+    uninstall)
+      local what="${1:-}"; [ -n "$what" ] || { usage; exit 1; }
+      if [ "$what" = "--all" ]; then
+        local versions
+        versions=$(list_versions_raw || true)
+        for v in $versions; do
+          uninstall_version "$v"
+        done
+      else
+        uninstall_version "$what"
+      fi
+      ;;
+    pool)
+      local sub="${1:-}"; shift || true
+      case "$sub" in
+        add)
+          local name="" ver=""
+          while [ $# -gt 0 ]; do
+            case "$1" in
+              --n|--name|-n|-name) name="$2"; shift 2;;
+              --v|--version|-v|-version) ver="$2"; shift 2;;
+              *) shift;;
+            esac
+          done
+          [ -n "$name" ] && [ -n "$ver" ] || die "pool add requires --n <name> --v <version>"
+          pool_add "$name" "$ver"
+          ;;
+        remove|rm|del|delete)
+          local name=""
+          while [ $# -gt 0 ]; do
+            case "$1" in
+              --n|--name|-n|-name) name="$2"; shift 2;;
+              *) shift;;
+            esac
+          done
+          [ -n "$name" ] || die "pool remove requires --n <name>"
+          pool_remove "$name"
+          ;;
+        change|migrate|move)
+          local name="" ver=""
+          while [ $# -gt 0 ]; do
+            case "$1" in
+              --n|--name|-n|-name) name="$2"; shift 2;;
+              --v|--version|-v|-version) ver="$2"; shift 2;;
+              *) shift;;
+            esac
+          done
+          [ -n "$name" ] && [ -n "$ver" ] || die "pool change requires --n <name> --v <new-version>"
+          pool_change "$name" "$ver"
+          ;;
+        *)
+          usage; exit 1;;
+      esac
+      ;;
+    module)
+      local mod="${1:-}"; shift || true
+      [ -n "$mod" ] || die "module name required"
+      local remove="0" ver=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --rm|--remove|-rm) remove="1"; shift;;
+          --v|--version|-v) ver="$2"; shift 2;;
+          *) shift;;
+        esac
+      done
+      if [ "$remove" = "1" ]; then
+        remove_module "$mod" "${ver:-}"
+      else
+        install_module "$mod" "${ver:-}"
+      fi
+      ;;
+    list)
+      local what="${1:-}"; shift || true
+      case "$what" in
+        versions) list_versions_cmd ;;
+        pools)
+          local ver=""
+          while [ $# -gt 0 ]; do
+            case "$1" in
+              --v|--version|-v) ver="$2"; shift 2;;
+              *) shift;;
+            esac
+          done
+          list_pools_cmd "${ver:-}"
+          ;;
+        *)
+          usage; exit 1;;
+      esac
+      ;;
+    help|-h|--help|"")
+      usage
+      ;;
+    *)
+      usage; exit 1;;
+  esac
+}
+
+main "$@" || exit 1
