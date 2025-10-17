@@ -10,6 +10,8 @@
 #   - pool add/remove/change      : Manage & migrate PHP-FPM pools per version
 #   - module <name> [--v ver]     : Add/remove module across versions or specific
 #   - list versions|pools         : Discover installed PHP versions and pools
+#   - update [--v ver]            : Update all PHP packages or specific version
+#   - self-update                 : Update xzit-php script from GitHub
 #
 # Notes:
 #   - Uses ppa:ondrej/php (Sury) for broad version coverage (5.6 → 8.x)
@@ -18,6 +20,9 @@
 set -euo pipefail
 
 SUPPORTED_ALL_VERSIONS=("5.6" "7.2" "8.0" "8.1" "8.2" "8.3" "8.4")
+# GitHub repository for self-update
+GITHUB_REPO="basteyy/xzit-php"
+GITHUB_RAW_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/xzit-php"
 # Note: 'fpm' is installed explicitly; do not include it here to avoid duplication
 DEFAULT_MODULES=(common cli mysql xml curl mbstring intl bcmath gd zip opcache memcached)
 # extra modules we often want if available
@@ -361,6 +366,8 @@ Usage:
   xzit-php module <name> --rm [--v <version>]      Remove module across all or for version
   xzit-php list versions                  List installed PHP-FPM versions
   xzit-php list pools [--v <version>]     List pools (all or per version)
+  xzit-php update [--v <version>]         Update PHP packages (all or specific version)
+  xzit-php self-update                   Update xzit-php script from GitHub
 
 Examples:
   xzit-php pool change --n shop --v 8.3
@@ -472,6 +479,37 @@ main() {
         *)
           usage; exit 1;;
       esac
+      ;;
+    update)
+      local ver="${1:-}"
+      if [ -n "$ver" ]; then
+        validate_version "$ver"
+        log "Updating PHP ${ver} packages…"
+        apt-get update
+        apt-get install -y "php${ver}-fpm" --only-upgrade
+        local pkgs
+        pkgs=$(dpkg -l | awk '/^ii/ {print $2}' | grep -E "^php${ver}-" || true)
+        if [ -n "$pkgs" ]; then
+          echo "$pkgs" | xargs apt-get install -y --only-upgrade || true
+        fi
+        log "PHP ${ver} updated."
+      else
+        log "Updating all PHP packages…"
+        apt-get update
+        apt-get upgrade -y "php*-fpm"
+        log "All PHP packages updated."
+      fi
+      ;;
+    self-update)
+      log "Self-updating xzit-php script from GitHub…"
+      local tmp_file
+      tmp_file=$(mktemp /tmp/xzit-php.XXXXXX)
+      curl -fsSL "${GITHUB_RAW_URL}" -o "$tmp_file" || die "Failed to download update."
+      chmod +x "$tmp_file"
+      # Optional: verify integrity with a checksum (e.g., sha256sum)
+      # echo "expected_checksum  $tmp_file" | sha256sum -c - || die "Checksum verification failed."
+      mv "$tmp_file" "$(realpath "$0")"
+      log "xzit-php script updated. Please re-run the script."
       ;;
     help|-h|--help|"")
       usage
