@@ -497,7 +497,10 @@ main() {
       else
         log "Updating all PHP packages…"
         apt-get update
-        apt-get upgrade -y "php*-fpm"
+        pkgs=$(dpkg -l | awk '/^ii/ {print $2}' | grep -E '^php.*-fpm$' || true)
+        if [ -n "$pkgs" ]; then
+          echo "$pkgs" | xargs apt-get install -y --only-upgrade || true
+        fi
         log "All PHP packages updated."
       fi
       ;;
