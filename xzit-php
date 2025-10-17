@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # xzit-php: Multi-version PHP FPM installer & manager for Ubuntu (Sury PPA)
 # License: CC0 1.0 Universal - see LICENSE
-# Author: Sebastian (xzit) — generated with ChatGPT
+# Author: Sebastian (xzit)
 # Requires: Ubuntu (20.04/22.04/24.04/25.x), apt, sudo/root
 #
 # Features:
@@ -18,7 +18,8 @@
 set -euo pipefail
 
 SUPPORTED_ALL_VERSIONS=("5.6" "7.2" "8.0" "8.1" "8.2" "8.3" "8.4" "8.5")
-DEFAULT_MODULES=(common cli fpm mysql xml curl mbstring intl bcmath gd zip opcache memcached)
+# Note: 'fpm' is installed explicitly; do not include it here to avoid duplication
+DEFAULT_MODULES=(common cli mysql xml curl mbstring intl bcmath gd zip opcache memcached)
 # extra modules we often want if available
 EXTRA_MODULES=(imagick redis xdebug)
 
@@ -30,15 +31,23 @@ exists() { command -v "$1" >/dev/null 2>&1; }
 
 ensure_root() { is_root || die "Run as root (sudo)."; }
 
+# Validate version format (e.g., 8.2, 7.4, 5.6)
+validate_version() {
+  local ver="$1"
+  if ! [[ "$ver" =~ ^[0-9]+\.[0-9]+$ ]]; then
+    die "Invalid version format: '${ver}'. Expected format: X.Y (e.g., 8.2)"
+  fi
+}
+
 # Enable and update ondrej/php repository (for many PHP versions)
 ensure_ondrej_repo() {
   if ! grep -Rqs "^deb .*ondrej/php" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
     log "Adding PPA: ondrej/php (Sury)…"
-    apt-get update -y
+    apt-get update
     apt-get install -y software-properties-common ca-certificates lsb-release apt-transport-https
     add-apt-repository -y ppa:ondrej/php
   fi
-  apt-get update -y
+  apt-get update
 }
 
 # Determine if a PHP version is installed (by fpm package or binary)
@@ -69,7 +78,11 @@ build_default_pkg_list() {
   local ver="$1"
   local pkgs=()
   for m in "${DEFAULT_MODULES[@]}"; do
-    pkgs+=("php${ver}-${m}")
+    if apt-cache show --no-all-versions "php${ver}-${m}" >/dev/null 2>&1; then
+      pkgs+=("php${ver}-${m}")
+    elif apt-cache show --no-all-versions "php-${m}" >/dev/null 2>&1; then
+      pkgs+=("php-${m}")
+    fi
   done
   # attempt extra modules if available (no fatal if missing)
   for m in "${EXTRA_MODULES[@]}"; do
@@ -87,12 +100,15 @@ build_default_pkg_list() {
 
 install_version() {
   local ver="$1"
+  validate_version "$ver"
   ensure_ondrej_repo
   log "Installing PHP ${ver} FPM + common modules…"
-  local pkgs
-  pkgs=$(build_default_pkg_list "$ver")
-  pkgs="$pkgs php${ver}-fpm"
-  apt-get install -y $pkgs
+  # Build a proper array of packages to avoid quoting/word-splitting issues
+  local pkgs_arr=()
+  # shellcheck disable=SC2207
+  read -r -a pkgs_arr <<< "$(build_default_pkg_list "$ver")"
+  # Install php-fpm for the version plus modules
+  apt-get install -y "php${ver}-fpm" "${pkgs_arr[@]}"
   systemctl enable "php${ver}-fpm" || true
   systemctl restart "php${ver}-fpm"
   log "PHP ${ver} installed."
@@ -100,6 +116,7 @@ install_version() {
 
 uninstall_version() {
   local ver="$1"
+  validate_version "$ver"
   if ! is_version_installed "$ver"; then
     log "PHP ${ver} not installed — skipping."
     return 0
@@ -108,9 +125,10 @@ uninstall_version() {
   systemctl stop "php${ver}-fpm" || true
   log "Removing PHP ${ver} packages…"
   local pkgs
-  pkgs=$(dpkg -l | awk '/^ii/ {print $2}' | grep -E "^php'"'"'${ver}'"'"'-" || true)
+  pkgs=$(dpkg -l | awk '/^ii/ {print $2}' | grep -E "^php${ver}-" || true)
   if [ -n "$pkgs" ]; then
-    apt-get purge -y $pkgs || true
+    # Use xargs to prevent errors if $pkgs is empty and to handle multiple packages
+    echo "$pkgs" | xargs apt-get purge -y || true
   fi
   apt-get autoremove -y
   log "PHP ${ver} removed."
@@ -128,7 +146,7 @@ install_module() {
     systemctl restart "php${ver}-fpm"
   else
     local versions
-    versions=$(list_versions_raw)
+    versions=$(list_versions_raw || true)
     for v in $versions; do
       local pkg
       if pkg=$(resolve_pkg_name "$v" "$mod" 2>/dev/null); then
@@ -156,7 +174,7 @@ remove_module() {
     fi
   else
     local versions
-    versions=$(list_versions_raw)
+    versions=$(list_versions_raw || true)
     for v in $versions; do
       local pkg
       if pkg=$(resolve_pkg_name "$v" "$mod" 2>/dev/null); then
@@ -171,6 +189,7 @@ remove_module() {
 
 pool_add() {
   local name="$1" ver="$2"
+  validate_version "$ver"
   is_version_installed "$ver" || die "PHP ${ver} not installed."
   local dir="/etc/php/${ver}/fpm/pool.d"
   local file="${dir}/${name}.conf"
@@ -199,7 +218,7 @@ EOF
 pool_remove() {
   local name="$1"
   local versions
-  versions=$(list_versions_raw)
+  versions=$(list_versions_raw || true)
   local removed=0
   for v in $versions; do
     local file="/etc/php/${v}/fpm/pool.d/${name}.conf"
@@ -253,7 +272,7 @@ pool_change() {
 }
 
 list_versions_raw() {
-  dpkg -l | awk '/^ii/ {print $2}' | grep -E '^php[0-9]\.[0-9]-fpm$' | sed -E 's/php([0-9]\.[0-9])-fpm/\1/' | sort -V
+  dpkg -l | awk '/^ii/ {print $2}' | grep -E '^php[0-9]+\.[0-9]+-fpm$' | sed -E 's/php([0-9]+\.[0-9]+)-fpm/\1/' | sort -V
 }
 
 list_versions_cmd() {
