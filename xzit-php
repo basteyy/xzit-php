@@ -505,10 +505,16 @@ main() {
       log "Self-updating xzit-php script from GitHub…"
       local tmp_file
       tmp_file=$(mktemp /tmp/xzit-php.XXXXXX)
+      local checksum_file
+      checksum_file=$(mktemp /tmp/xzit-php.sha256.XXXXXX)
       curl -fsSL "${GITHUB_RAW_URL}" -o "$tmp_file" || die "Failed to download update."
+      curl -fsSL "${GITHUB_RAW_URL}.sha256" -o "$checksum_file" || die "Failed to download checksum."
+      # The .sha256 file should contain: "<sha256sum>  xzit-php"
+      # Replace the filename in the checksum file with the temp file's name for verification
+      sed "s/  xzit-php$/  $tmp_file/" "$checksum_file" > "${checksum_file}.tmp"
+      mv "${checksum_file}.tmp" "$checksum_file"
+      sha256sum -c "$checksum_file" || die "Checksum verification failed."
       chmod +x "$tmp_file"
-      # Optional: verify integrity with a checksum (e.g., sha256sum)
-      # echo "expected_checksum  $tmp_file" | sha256sum -c - || die "Checksum verification failed."
       mv "$tmp_file" "$(realpath "$0")"
       log "xzit-php script updated. Please re-run the script."
       ;;
