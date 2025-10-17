@@ -69,7 +69,7 @@ xzit-php list pools --v 8.2
 When installing a version, the following modules are included (if available):
 
 ```
-common cli fpm mysql xml curl mbstring intl bcmath gd zip opcache
+common cli fpm mysql xml curl mbstring intl bcmath gd zip opcache memcached
 ```
 
 Additionally, these are installed if present:
