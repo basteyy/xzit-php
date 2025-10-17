@@ -43,10 +43,8 @@ while [ $# -gt 0 ]; do
     --from)     SOURCE_PATH="${2:-}"; shift 2 ;;
     -h|--help)  usage; exit 0 ;;
     *) echo "Unknown option: $1"; usage; exit 1 ;;
-  case_esac_done=true
   esac
 done
-: "${case_esac_done:=true}" # quiet shellcheck
 
 # --- checks ---
 [ "$(id -u)" -eq 0 ] || die "Run as root (use sudo)."

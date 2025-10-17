@@ -20,7 +20,7 @@ sudo ./setup.sh --with-ppa
 or directly:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/basteyy/xzit-php/main/setup.sh | sudo bash -s -- --with-ppa
+curl -sSL https://raw.githubusercontent.com/basteyy/xzit-php/refs/heads/dev/setup.sh | sudo bash -s -- --with-ppa
 ```
 
 Options:
